@@ -1,0 +1,120 @@
+version: '3.8'
+        
+configs:
+  monitor_filebeat:
+    external: true
+    name: monitor_filebeat_v4
+    
+services:
+
+# logs with filebeat - ref.: https://medium.com/@bcoste/powerful-logging-with-docker-filebeat-and-elasticsearch-8ad021aecd87
+  filebeat:
+    image: elastic/filebeat:7.7.1
+    user: root
+    configs:
+      - source: monitor_filebeat
+        target: /usr/share/filebeat/filebeat.yml
+    deploy:
+      mode: global
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        - co.elastic.logs/enabled=false
+    volumes:
+     - "filebeat_data:/usr/share/filebeat/data:rw"
+     #- "/var/lib/docker/containers:/usr/share/filebeat/dockerlogs/data:ro"
+     - "/var/lib/docker/volumes:/var/lib/docker/volumes:ro"
+     - "/var/run/docker.sock:/var/run/docker.sock"
+  
+  elasticsearch:
+    image: elasticsearch:7.7.1
+    environment:
+      - node.data=true
+      - cluster.routing.allocation.disk.threshold_enabled=false
+      - discovery.type=single-node
+      # avoid error "field expansion for [*] matches too many fields, limit: 1024, got: 2836"
+      - indices.query.bool.max_clause_count=5000
+      - ES_JAVA_OPTS=-Xms2g -Xmx2g
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    networks:
+      - default
+      - web
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          #- node.role == manager
+          - node.hostname == ${NODE_HOSTNAME}
+      restart_policy:
+        condition: any # any | none | on-failure
+      #resources:
+        #limits:
+          #cpus: '0.5'
+          #memory: 2048M
+      labels:
+        - co.elastic.logs/enabled=false
+        - traefik.frontend.rule=Host:elasticsearch.logs.${DOMAIN}
+        - traefik.enable=true
+        - traefik.port=9200
+        - traefik.docker.network=web
+        - traefik.redirectorservice.frontend.entryPoints=http
+        - traefik.redirectorservice.frontend.redirect.entryPoint=https
+        - traefik.webservice.frontend.entryPoints=https
+        - traefik.frontend.auth.basic.users=${ADMIN_USER}:${ADMIN_PASSWORD_HASH}
+
+        
+  elasticsearch-delete_old_indices:
+    image: elasticsearch:7.7.1
+    command: bash /usr/share/elasticsearch/data/delete_old_indices.sh
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    deploy:
+      mode: replicated
+      replicas: 1
+      update_config:
+        delay: 24h
+      rollback_config:
+        parallelism: 2
+        delay: 10s
+
+  kibana:
+    image: kibana:7.7.1
+    environment:
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    networks:
+      - web
+      - default
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          #- node.role == manager
+          - node.hostname == ${NODE_HOSTNAME}
+      labels:
+        - co.elastic.logs/enabled=false
+        - traefik.frontend.rule=Host:logs.${DOMAIN}
+        - traefik.enable=true
+        - traefik.port=5601
+        - traefik.docker.network=web
+        - traefik.redirectorservice.frontend.entryPoints=http
+        - traefik.redirectorservice.frontend.redirect.entryPoint=https
+        - traefik.webservice.frontend.entryPoints=https
+        - traefik.frontend.auth.basic.users=${ADMIN_USER}:${ADMIN_PASSWORD_HASH}
+        
+
+volumes:
+    filebeat_data: {}
+    elasticsearch-data: {}
+    
+    
+networks:
+  net:
+    driver: overlay
+    attachable: true
+  web:
+    external: true
